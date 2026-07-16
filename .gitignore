@@ -1,0 +1,5 @@
+# Build artifacts
+*.o
+emax12
+test_dsp
+build-arm64/
