@@ -1,14 +1,14 @@
 #!/bin/sh
-# scripts/build.sh -- cross-compile emax12 for Move (aarch64 Linux).
+# scripts/build.sh -- cross-compile Emax_FX.so for Move (aarch64 Linux).
 #
-# Move runs an ARM64 (Cortex-A72) SoC, not the architecture you're
-# developing on, so the on-device binary needs a real cross-compile.
-# This follows the same Docker-based cross-compile pattern schwung-rex
-# uses (see its .github/workflows and scripts/build.sh for the reference
-# this is modeled on -- I could not fetch that file's exact contents
-# directly, GitHub blocked directory access for me here, so double check
-# your Docker base image / JACK header source against theirs if this
-# doesn't build cleanly).
+# CORRECTED ARCHITECTURE: emax12 is a Schwung audio_fx PLUGIN -- a
+# shared library (Emax_FX.so) dlopen()'d by Schwung's chain host and
+# exporting move_audio_fx_init_v2() (see src/audio_fx_api_v2.h and
+# docs/MODULES.md in charlesvestal/schwung). Earlier drafts built a
+# standalone JACK2 client instead, which is not how Schwung audio_fx
+# modules actually load -- that mismatch is why the Module Store kept
+# rejecting the tarball ("No module.json found"). This version builds
+# the real plugin shared library and no longer depends on JACK headers.
 #
 # Requires: Docker.
 
@@ -22,7 +22,7 @@ mkdir -p "$OUT_DIR"
 cat > /tmp/emax12-Dockerfile <<'EOF'
 FROM arm64v8/debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential pkg-config libjack-jackd2-dev \
+    build-essential pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /work
 EOF
@@ -38,8 +38,8 @@ docker run --rm --platform=linux/arm64 \
     -v "$(pwd)":/work \
     -v "$OUT_DIR":/out \
     "$IMAGE_NAME" \
-    sh -c "cc -O2 -Wall -Wextra -std=c11 -D_POSIX_C_SOURCE=200809L \
-           -o /out/emax12 src/emax_dsp.c src/main_jack.c -ljack -lm"
+    sh -c "cc -O2 -Wall -Wextra -std=c11 -D_POSIX_C_SOURCE=200809L -fPIC \
+           -shared -o /out/Emax_FX.so src/emax_dsp.c src/emax_audio_fx.c -lm"
 
-echo "==> Built: $OUT_DIR/emax12"
-echo "    Next: scripts/install.sh"
+echo "==> Built: $OUT_DIR/Emax_FX.so"
+echo "    Next: scripts/package.sh"

@@ -46,55 +46,85 @@ audio" — a common mistake in bitcrusher-style plugins.
 
 - **DSP core**: implemented and tested (`make test` — runs a synthetic
   sweep through all four rate presets, checks for NaN/Inf, verifies the
-  quantizer's step size against theoretical 12-bit).
-- **JACK2 client**: implemented, MIDI CC control surface (see
-  `src/main_jack.c` header comment for CC assignments).
-- **Install path/user corrected** against real published modules
-  (schwung-jv880, schwung-rex): SSH deploy goes to
-  `/data/UserData/schwung/modules/audio_fx/emax12/` as `ableton@move.local`
-  (not `root@`, and not the `move-anything` path used in an earlier draft
-  of this script).
-- **`release.json` added and confirmed against a real published module**
-  (timncox/schwung-mark): Schwung Manager's "Install Custom Module" flow
-  (`move.local:7700/modules`) reads `release.json` from the repo root and
-  downloads/extracts the tarball named at `download_url`, which points to
-  a GitHub Release asset. `scripts/package.sh` builds that tarball
-  (`emax12-module.tar.gz`) from the ARM64 binary.
+  quantizer's step size against theoretical 12-bit). Unchanged and still
+  passing through every architecture revision below.
+- **Architecture corrected**: earlier drafts of this project built
+  `emax12` as a standalone JACK2 client. That is **not** how Schwung
+  `audio_fx` modules actually load. Per `docs/MODULES.md` in
+  charlesvestal/schwung, an audio_fx module is a **shared library**
+  (`Emax_FX.so`) that the chain host `dlopen()`s and calls through
+  `audio_fx_api_v2_t` (`create_instance` / `process_block` / `set_param`
+  / `get_param`), located via a **required** `module.json` manifest at
+  the module root. This mismatch — not a missing file — is why the
+  Module Store kept rejecting the tarball with "No module.json found in
+  tarball." The DSP core itself needed no changes; only the wrapper
+  (`src/emax_audio_fx.c`, replacing the old `src/main_jack.c`) and the
+  build/package/install scripts were rewritten.
+- **`module.json`** added at the repo root, matching the documented
+  schema (`id`, `name`, `version`, `api_version`, `capabilities.chainable`,
+  `capabilities.component_type: "audio_fx"`, `capabilities.chain_params`
+  for the four exposed parameters).
+- **Tarball structure corrected**: `Emax_FX-module.tar.gz` now extracts to
+  `Emax_FX/module.json` + `emax12/Emax_FX.so`, matching the schema
+  documented in `docs/MODULES.md`'s "Publishing to Module Store" section.
+- **Install path/user** confirmed against real published modules
+  (schwung-jv880, schwung-rex): `/data/UserData/schwung/modules/audio_fx/emax12/`
+  as `ableton@move.local`.
+- **`release.json`** confirmed against `docs/MODULES.md`'s documented
+  schema and a real published module (timncox/schwung-mark). Schwung
+  Manager's "Install Custom Module" flow (`move.local:7700/modules`)
+  reads `release.json` from the repo root and downloads/extracts the
+  tarball named at `download_url`.
+- **Not yet verified on-device**: the plugin loads and passes `make test`
+  in isolation, but has not yet been confirmed to load correctly inside
+  Schwung's chain host on real Move hardware (dlopen success, parameter
+  round-trip through Shadow UI, actual audio through the chain). That's
+  the next real test.
 
 ## Install
 
 **Option A — Schwung Manager "Install Custom Module" (recommended):**
 ```sh
 make test              # sanity check
-./scripts/build.sh      # ARM64 cross-compile via Docker
-./scripts/package.sh    # produces emax12-module.tar.gz
+./scripts/build.sh      # ARM64 cross-compile via Docker -> Emax_FX.so
+./scripts/package.sh    # produces Emax_FX-module.tar.gz (module.json + Emax_FX.so)
 ```
-Then create a GitHub Release tagged to match `release.json`'s version
-(e.g. `v0.1.0`), upload `emax12-module.tar.gz` as a release asset, and in
-Schwung Manager (`move.local:7700/modules`) choose "Install Custom
-Module" and give it this repo's URL.
+Then create/update a GitHub Release tagged to match `release.json`'s
+version (e.g. `v0.1.0`), upload `Emax_FX-module.tar.gz` as a release
+asset, and in Schwung Manager (`move.local:7700/modules`) choose
+"Install Custom Module" and give it this repo's URL.
 
 **Option B — direct SSH deploy (bypasses the Module Store UI):**
 ```sh
 ./scripts/build.sh
-./scripts/install.sh    # scp's straight to ableton@move.local
+./scripts/install.sh    # scp's Emax_FX.so + module.json to ableton@move.local
 ```
 
 ## Build
 
 ```sh
-make test          # native sanity check, no JACK needed
-./scripts/build.sh  # ARM64 cross-compile via Docker, for the actual Move
-./scripts/install.sh  # deploy to move.local over SSH
+make test          # native sanity check of the DSP core only
+./scripts/build.sh  # ARM64 cross-compile via Docker -> build-arm64/Emax_FX.so
+./scripts/package.sh # -> Emax_FX-module.tar.gz
+./scripts/install.sh # deploy to move.local over SSH
 ```
 
-## Controls (JACK MIDI CC on the module's `midi_in` port)
+## Controls (Shadow UI chain_params, see `module.json`)
 
-| CC | Function | Range |
+| Key | Function | Range |
 |---|---|---|
-| 20 | Sample rate | 0-31=10kHz, 32-63=20kHz, 64-95=28kHz, 96-127=42kHz |
-| 21 | Ladder filter cutoff | 200 Hz – 12 kHz, log |
-| 22 | Ladder filter resonance | 0 – 0.98 |
-| 23 | Ladder filter bypass | <64=off, >=64=on |
+| `rate` | Sample rate | enum: `10kHz`, `20kHz`, `28kHz`, `42kHz` |
+| `ladder_cutoff` | Ladder filter cutoff | 200–12000 Hz |
+| `ladder_resonance` | Ladder filter resonance | 0–0.98 |
+| `ladder_bypass` | Ladder filter bypass | enum: `Off`, `On` |
 
-Default on startup: 10 kHz / 12-bit (the "Emaxed" lo-fi reference point).
+Default on startup: 10 kHz / 12-bit (the "Emaxed" lo-fi reference point),
+ladder at 8000 Hz / 0.2 resonance, enabled.
+
+## Known simplification
+
+`create_instance()` does not currently parse the `config_json` the host
+passes on load (saved `config.json` / `module.json` defaults) — it starts
+from fixed defaults and relies on the host calling `set_param()` to apply
+saved/UI values afterward. This is called out in `src/emax_audio_fx.c` and
+hasn't been verified against real on-device Shadow UI behavior yet.
