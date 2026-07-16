@@ -12,13 +12,17 @@
         "audio_out": true,
         "chainable": true,
         "component_type": "audio_fx",
+        "capture": {
+            "groups": ["pads"]
+        },
         "chain_params": [
             {
                 "key": "rate",
                 "name": "Sample Rate",
                 "type": "enum",
                 "options": ["10kHz", "20kHz", "28kHz", "42kHz"],
-                "default": "10kHz"
+                "default": "10kHz",
+                "options_as_string": true
             },
             {
                 "key": "ladder_cutoff",
@@ -44,7 +48,8 @@
                 "name": "Ladder Bypass",
                 "type": "enum",
                 "options": ["Off", "On"],
-                "default": "Off"
+                "default": "Off",
+                "options_as_string": true
             }
         ]
     }

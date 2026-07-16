@@ -128,3 +128,43 @@ passes on load (saved `config.json` / `module.json` defaults) — it starts
 from fixed defaults and relies on the host calling `set_param()` to apply
 saved/UI values afterward. This is called out in `src/emax_audio_fx.c` and
 hasn't been verified against real on-device Shadow UI behavior yet.
+
+## Knob control fix
+
+The 8 physical knobs map to `chain_params` automatically per Schwung's
+docs, but `rate` and `ladder_bypass` are `enum` type params, and by
+default Schwung's Shadow UI sends the enum option's numeric **index**
+over the wire, not its string label — while this plugin's `set_param()`
+compares against the literal label strings. Both entries now declare
+`"options_as_string": true` in `module.json` to force string-label wire
+format and match. If knobs still don't respond after this fix, the more
+likely cause is that the Audio FX slot isn't focused/selected in the
+Shadow UI chain editor — knobs 1-8 control whichever component (synth,
+FX1, FX2) currently has focus.
+
+## Pitch-tracked aliasing (experimental)
+
+On real Emax hardware, aliasing artifacts transpose with playback pitch,
+because the crush rate was fixed at record time and playing a note at a
+different pitch just speeds up or slows down the whole waveform —
+artifacts included. Since this module is an *insert effect* downstream
+of whatever's generating audio, it doesn't inherently know what note is
+playing. To emulate this, `module.json` now sets `capabilities.capture`
+to the `pads` control group, routing note-on/off MIDI to `on_midi()` in
+`src/emax_audio_fx.c`. When a note arrives, `rate` is treated as the
+*base* crush rate at C4 (MIDI note 60), and the effective rate scales by
+`2^((note-60)/12)` — C5 crushes at 2x the base rate, C3 at 0.5x.
+
+**This is unverified on-device and carries real risk.** Whether
+module-level `capture` of the pad group *mirrors* notes to `on_midi()`
+or *steals* them from the sound generator in the same chain slot isn't
+something I could confirm from available documentation — it's described
+generically as blocking captured controls from their normal destination.
+**If installing this silences the synth**, remove the `"capture"` block
+from `module.json`, rebuild, and repackage — the plugin falls back to
+untransposed aliasing (previous behavior) with no other code changes
+needed.
+
+Also a known simplification: this tracks a single global "current note"
+(last note-on wins), not per-voice polyphony. Chords will all alias at
+whichever note was struck most recently, not each note independently.

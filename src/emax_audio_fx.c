@@ -28,6 +28,32 @@
  * Writing a minimal JSON parser for config_json was out of scope here;
  * flagging this explicitly rather than silently guessing at behavior
  * that wasn't verified on-device.
+ *
+ * NOTE-TRACKED ALIASING (experimental, on_midi):
+ * On a real Emax, aliasing artifacts transpose with playback pitch,
+ * because the target crush-rate was fixed at RECORD time and the
+ * played-back note just speeds up or slows down the whole waveform
+ * (varispeed) -- artifacts included. This module is downstream of
+ * whatever's generating audio, so it doesn't know the note being played
+ * unless the host routes MIDI to on_midi() via a capture rule (see
+ * module.json's "capture" field). When it does, the "rate" parameter is
+ * treated as the *base* rate at C4 (MIDI note 60), and each note-on
+ * scales the effective crush rate by 2^((note-60)/12) -- so C5 crushes
+ * at 2x the base rate (finer aliasing) and C3 at 0.5x (coarser),
+ * matching the user's spec.
+ *
+ * CAVEAT: whether module-level "capture" of the pad/note group mirrors
+ * notes to on_midi vs. actually stealing them from the sound generator
+ * in the same chain slot is NOT something I could confirm from
+ * available docs -- it's described generically as blocking captured
+ * controls from their normal destination. If enabling capture in
+ * module.json silences the synth, remove the "capture" block and this
+ * feature falls back to untransposed aliasing (previous behavior)
+ * without needing a rebuild.
+ *
+ * Also a real simplification: this tracks a single global "current
+ * note" (last note-on wins), not per-voice/polyphonic pitch. Chords
+ * will all alias at the last-played note's rate, not each note's own.
  */
 
 #include <stdint.h>
@@ -43,6 +69,8 @@ typedef struct {
     EmaxVoice left;
     EmaxVoice right;
     double sample_rate;
+    double base_rate_hz;   /* the user-selected preset, applies at C4 (note 60) */
+    int current_note;      /* last note-on received via on_midi; -1 = none yet */
 } Emax12Instance;
 
 static double clampd(double x, double lo, double hi) {
@@ -51,14 +79,28 @@ static double clampd(double x, double lo, double hi) {
     return x;
 }
 
+static double rate_string_to_hz(const char *val) {
+    if (strcmp(val, "20kHz") == 0) return EMAX_RATE_20K;
+    if (strcmp(val, "28kHz") == 0) return EMAX_RATE_28K;
+    if (strcmp(val, "42kHz") == 0) return EMAX_RATE_42K;
+    return EMAX_RATE_10K;
+}
+
+/* Recompute and apply the effective crush rate = base_rate_hz scaled by
+ * the current note's distance from C4 (note 60), in semitones. */
+static void update_effective_rate(Emax12Instance *inst) {
+    double ratio = 1.0;
+    if (inst->current_note >= 0) {
+        ratio = pow(2.0, (inst->current_note - 60) / 12.0);
+    }
+    double effective_hz = clampd(inst->base_rate_hz * ratio, 4000.0, 48000.0);
+    emax_voice_set_rate(&inst->left, effective_hz);
+    emax_voice_set_rate(&inst->right, effective_hz);
+}
+
 static void apply_rate_string(Emax12Instance *inst, const char *val) {
-    double rate = 10000.0;
-    if (strcmp(val, "10kHz") == 0) rate = EMAX_RATE_10K;
-    else if (strcmp(val, "20kHz") == 0) rate = EMAX_RATE_20K;
-    else if (strcmp(val, "28kHz") == 0) rate = EMAX_RATE_28K;
-    else if (strcmp(val, "42kHz") == 0) rate = EMAX_RATE_42K;
-    emax_voice_set_rate(&inst->left, rate);
-    emax_voice_set_rate(&inst->right, rate);
+    inst->base_rate_hz = rate_string_to_hz(val);
+    update_effective_rate(inst);
 }
 
 static void* create_instance(const char *module_dir, const char *config_json) {
@@ -69,6 +111,7 @@ static void* create_instance(const char *module_dir, const char *config_json) {
     if (!inst) return NULL;
 
     inst->sample_rate = 44100.0; /* Move's fixed host rate, per docs/MODULES.md */
+    inst->current_note = -1; /* no note seen yet -> untransposed base rate */
     emax_voice_init(&inst->left, inst->sample_rate);
     emax_voice_init(&inst->right, inst->sample_rate);
     apply_rate_string(inst, "10kHz");
@@ -138,7 +181,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
 
     if (strcmp(key, "rate") == 0) {
         const char *s = "10kHz";
-        double r = inst->left.target_sample_rate;
+        double r = inst->base_rate_hz;
         if (r == EMAX_RATE_20K) s = "20kHz";
         else if (r == EMAX_RATE_28K) s = "28kHz";
         else if (r == EMAX_RATE_42K) s = "42kHz";
@@ -157,6 +200,31 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     return -1;
 }
 
+static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
+    (void)source;
+    Emax12Instance *inst = (Emax12Instance*)instance;
+    if (!inst || !msg || len < 3) return;
+
+    uint8_t status = msg[0] & 0xF0;
+    uint8_t note = msg[1];
+    uint8_t velocity = msg[2];
+
+    if (status == 0x90 && velocity > 0) {
+        /* Note On */
+        inst->current_note = note;
+        update_effective_rate(inst);
+    } else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
+        /* Note Off -- monophonic simplification: only clear tracking if
+         * this was the note we're currently tracking, so a released
+         * lower/higher note in a chord doesn't yank the rate back. */
+        if (inst->current_note == note) {
+            /* Leave the last rate in place rather than snapping back to
+             * base -- avoids an audible jump at release. Real polyphonic
+             * tracking would need a per-voice note stack, out of scope. */
+        }
+    }
+}
+
 static audio_fx_api_v2_t api = {
     .api_version = 2,
     .create_instance = create_instance,
@@ -164,7 +232,7 @@ static audio_fx_api_v2_t api = {
     .process_block = process_block,
     .set_param = set_param,
     .get_param = get_param,
-    .on_midi = NULL,
+    .on_midi = on_midi,
 };
 
 audio_fx_api_v2_t* move_audio_fx_init_v2(const host_api_v1_t *host) {
