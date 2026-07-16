@@ -30,7 +30,7 @@
                 "type": "float",
                 "min": 200,
                 "max": 12000,
-                "step": 10,
+                "step": 100,
                 "default": 8000,
                 "unit": "Hz"
             },
