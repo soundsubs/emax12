@@ -1,4 +1,4 @@
 {
-  "version": "0.1.0",
-  "download_url": "https://github.com/soundsubs/emax12/releases/download/v0.1.0/emax12-module.tar.gz"
+    "version": "emax",
+    "download_url": "https://github.com/soundsubs/emax12/releases/download/emax/emax12-module.tar.gz"
 }
