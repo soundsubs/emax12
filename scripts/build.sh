@@ -31,10 +31,10 @@ echo "==> Building cross-compile image (arm64v8/debian base, needs QEMU"
 echo "    user-mode emulation registered -- run 'docker run --privileged"
 echo "    --rm tonistiigi/binfmt --install arm64' once if this image"
 echo "    fails to start)."
-docker build -t "$IMAGE_NAME" -f /tmp/emax12-Dockerfile .
+docker build --platform=linux/arm64 -t "$IMAGE_NAME" -f /tmp/emax12-Dockerfile .
 
 echo "==> Compiling inside container..."
-docker run --rm \
+docker run --rm --platform=linux/arm64 \
     -v "$(pwd)":/work \
     -v "$OUT_DIR":/out \
     "$IMAGE_NAME" \
