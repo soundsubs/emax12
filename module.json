@@ -1,7 +1,7 @@
 {
     "id": "Emax_FX",
     "name": "Emax FX",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "abbrev": "EmaxFX",
     "description": "E-mu Emax 12-bit sampling emulation: 7-pole AA filter, S/H decimation, 12-bit quantization, SSM2047-style ladder",
     "author": "soundsubs",
