@@ -16,9 +16,27 @@
  *
  * Parameters (see module.json capabilities.chain_params):
  *   rate             enum: "10kHz" | "20kHz" | "28kHz" | "42kHz"
- *   ladder_cutoff    float, 200-12000 Hz
+ *   ladder_cutoff    float, 0.0-1.0 normalized, log-mapped to 200-12000 Hz
+ *                    internally (see cutoff_norm_to_hz/hz_to_norm below)
  *   ladder_resonance float, 0-0.98
  *   ladder_bypass    enum: "Off" | "On"
+ *
+ * LADDER_CUTOFF IS NORMALIZED, NOT RAW HZ: on-device testing showed the
+ * Shadow UI applies a fixed absolute float step (0.01) to knob turns
+ * regardless of a chain_params entry's declared "step" -- so a knob
+ * spanning 200-12000 (declared step or not) always took ~1,180,000
+ * ticks... no, ~1,180 knob-detents to sweep, since the effective step
+ * was a flat 0.01 *in raw units*, not scaled to the declared range. The
+ * only reliable lever turned out to be shrinking the declared range
+ * itself. docs/MODULES.md describes float params as "0.0-1.0 typical",
+ * which matches: a 0-1 range with a 0.01 step gives exactly ~100 ticks
+ * full-sweep, which is what we actually want. So ladder_cutoff is now
+ * normalized 0-1 and log-mapped to 200-12000 Hz here (log mapping also
+ * happens to suit filter-cutoff perception better than linear Hz would
+ * have). Known tradeoff: the Shadow UI most likely displays the raw
+ * 0.00-1.00 value on-screen rather than the derived Hz number -- I don't
+ * have confirmed info on whether it does unit-aware display formatting
+ * for arbitrary units like "Hz".
  *
  * KNOWN SIMPLIFICATION: create_instance() does not parse config_json
  * (saved config.json / module.json defaults) on load -- it starts from
@@ -77,6 +95,21 @@ static double clampd(double x, double lo, double hi) {
     if (x < lo) return lo;
     if (x > hi) return hi;
     return x;
+}
+
+/* ladder_cutoff wire value is normalized 0.0-1.0; log-mapped to the
+ * musically useful 200-12000 Hz range. See header comment for why. */
+#define CUTOFF_HZ_MIN 200.0
+#define CUTOFF_HZ_MAX 12000.0
+
+static double cutoff_norm_to_hz(double norm) {
+    norm = clampd(norm, 0.0, 1.0);
+    return CUTOFF_HZ_MIN * pow(CUTOFF_HZ_MAX / CUTOFF_HZ_MIN, norm);
+}
+
+static double cutoff_hz_to_norm(double hz) {
+    hz = clampd(hz, CUTOFF_HZ_MIN, CUTOFF_HZ_MAX);
+    return log(hz / CUTOFF_HZ_MIN) / log(CUTOFF_HZ_MAX / CUTOFF_HZ_MIN);
 }
 
 static double rate_string_to_hz(const char *val) {
@@ -157,7 +190,7 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "rate") == 0) {
         apply_rate_string(inst, val);
     } else if (strcmp(key, "ladder_cutoff") == 0) {
-        double hz = clampd(atof(val), 20.0, 18000.0);
+        double hz = cutoff_norm_to_hz(atof(val));
         inst->left.ladder_cutoff_hz = hz;
         inst->right.ladder_cutoff_hz = hz;
         emax_ladder_set(&inst->left.ladder, hz, inst->left.ladder_resonance);
@@ -188,7 +221,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         int n = snprintf(buf, (size_t)buf_len, "%s", s);
         return n;
     } else if (strcmp(key, "ladder_cutoff") == 0) {
-        int n = snprintf(buf, (size_t)buf_len, "%.3f", inst->left.ladder_cutoff_hz);
+        int n = snprintf(buf, (size_t)buf_len, "%.4f", cutoff_hz_to_norm(inst->left.ladder_cutoff_hz));
         return n;
     } else if (strcmp(key, "ladder_resonance") == 0) {
         int n = snprintf(buf, (size_t)buf_len, "%.3f", inst->left.ladder_resonance);
