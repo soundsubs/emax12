@@ -17,9 +17,16 @@
  * Parameters (see module.json capabilities.chain_params):
  *   rate             enum: "10kHz" | "20kHz" | "28kHz" | "42kHz"
  *   ladder_cutoff    float, 0.0-1.0 normalized, log-mapped to 200-12000 Hz
- *                    internally (see cutoff_norm_to_hz/hz_to_norm below)
+ *                    internally (see cutoff_norm_to_hz/hz_to_norm below).
+ *                    This is the filter's REST position.
  *   ladder_resonance float, 0-0.98
- *   ladder_enabled   enum: "Off" | "On" (On = filter engaged)
+ *   env_amount       float, 0.0-1.0 (0-100%). How much the ADSR pushes
+ *                    the cutoff open ABOVE ladder_cutoff, additive,
+ *                    clamped so it can never exceed 1.0 (fully open).
+ *                    At env_amount=0, the envelope has no audible effect
+ *                    regardless of A/D/S/R. At ladder_cutoff=1.0 (fully
+ *                    open already), env_amount has no room left to add,
+ *                    so it becomes inaudible too -- both by design.
  *
  * LADDER_CUTOFF IS NORMALIZED, NOT RAW HZ: on-device testing showed the
  * Shadow UI applies a fixed absolute float step (0.01) to knob turns
@@ -75,19 +82,19 @@
  *
  * FILTER ENVELOPE (knobs 5-8, also depends on on_midi/capture):
  * env_attack/env_decay/env_sustain/env_release drive a standard ADSR
- * that modulates the ladder filter cutoff over time, sweeping between
- * the floor (200 Hz) and the manually-set ladder_cutoff knob (which now
- * acts as the envelope's peak/target rather than a static cutoff).
- * A/D/R are normalized 0-1, log-mapped to 1ms-5000ms (same reasoning as
- * ladder_cutoff's normalization -- see above). Sustain is a plain 0-1
- * level, no mapping needed.
+ * (rest state 0, peaks at 1 during attack, settles at sustain level,
+ * returns to 0 on release) whose output is scaled by env_amount (knob 4)
+ * and added on top of ladder_cutoff (knob 2, now the filter's REST
+ * position rather than a peak target) -- see effective cutoff formula
+ * in process_block(). A/D/R are normalized 0-1, log-mapped to
+ * 1ms-5000ms (same reasoning as ladder_cutoff's normalization). Sustain
+ * is a plain 0-1 level, no mapping needed.
  *
- * SAFE-FALLBACK DESIGN: env_level starts at 1.0 (fully open) and only
- * moves once on_midi actually receives a note-on. If module-level
- * capture never fires (the same unverified risk noted above), the
- * envelope simply never engages and the filter behaves exactly as
- * before -- manual cutoff only, no regression. Once a note does arrive,
- * standard ADSR behavior kicks in from then on.
+ * Because env_amount defaults meaningfully and the envelope itself rests
+ * at 0 when no note has played, there's no special fallback state needed
+ * this time (unlike the earlier multiplicative design): with
+ * env_amount=0 the envelope is simply inaudible regardless of whether
+ * on_midi/capture ever fires at all.
  */
 
 #include <stdint.h>
@@ -114,7 +121,8 @@ typedef struct {
     double base_rate_hz;   /* the user-selected preset, applies at C4 (note 60) */
     int current_note;      /* last note-on received via on_midi; -1 = none yet */
 
-    double base_cutoff_norm; /* manual ladder_cutoff knob position; envelope peak target */
+    double base_cutoff_norm; /* ladder_cutoff knob position; filter's REST cutoff */
+    double env_amount;       /* 0.0-1.0; how much ADSR adds atop base_cutoff_norm */
 
     EnvStage env_stage;
     double env_level;          /* current 0.0-1.0 envelope output */
@@ -234,9 +242,8 @@ static void env_process(Emax12Instance *inst, double dt) {
         break;
     case ENV_IDLE:
     default:
-        /* Hold current level -- see SAFE-FALLBACK DESIGN in header
-         * comment: starts at 1.0 and only moves once a note-on ever
-         * arrives via on_midi. */
+        /* Hold current level (0 at rest, since env_level now starts at
+         * 0.0 -- see create_instance). */
         break;
     }
 }
@@ -262,9 +269,12 @@ static void* create_instance(const char *module_dir, const char *config_json) {
     emax_voice_init(&inst->left, inst->sample_rate);
     emax_voice_init(&inst->right, inst->sample_rate);
     apply_rate_string(inst, "10kHz");
+    /* Ladder filter is always engaged now -- knob 4 was repurposed from
+     * an on/off toggle to env_amount (see header comment). */
     inst->left.ladder_enabled = 1;
     inst->right.ladder_enabled = 1;
     inst->base_cutoff_norm = cutoff_hz_to_norm(8000.0);
+    inst->env_amount = 0.3; /* 30% -- audible out of the box, not overwhelming */
     inst->left.ladder_cutoff_hz = 8000.0;
     inst->right.ladder_cutoff_hz = 8000.0;
     inst->left.ladder_resonance = 0.2;
@@ -273,7 +283,7 @@ static void* create_instance(const char *module_dir, const char *config_json) {
     emax_ladder_set(&inst->right.ladder, 8000.0, 0.2);
 
     inst->env_stage = ENV_IDLE;
-    inst->env_level = 1.0; /* fully open until/unless a note-on ever arrives */
+    inst->env_level = 0.0; /* standard ADSR rest state */
     inst->attack_sec = 0.01;   /* 10ms */
     inst->decay_sec = 0.2;     /* 200ms */
     inst->sustain_level = 0.7;
@@ -294,7 +304,12 @@ static void process_block(void *instance, int16_t *audio_inout, int frames) {
 
     for (int i = 0; i < frames; i++) {
         env_process(inst, dt);
-        double eff_norm = clampd(inst->env_level * inst->base_cutoff_norm, 0.0, 1.0);
+        /* Effective cutoff = rest position (ladder_cutoff) plus however
+         * much the envelope is currently contributing, scaled by
+         * env_amount, clamped so it can never exceed fully-open (1.0).
+         * At env_amount=0 or ladder_cutoff=1.0, this reduces to a no-op
+         * -- see header comment. */
+        double eff_norm = clampd(inst->base_cutoff_norm + inst->env_level * inst->env_amount, 0.0, 1.0);
         double eff_hz = cutoff_norm_to_hz(eff_norm);
         emax_ladder_set(&inst->left.ladder, eff_hz, inst->left.ladder_resonance);
         emax_ladder_set(&inst->right.ladder, eff_hz, inst->right.ladder_resonance);
@@ -325,10 +340,8 @@ static void set_param(void *instance, const char *key, const char *val) {
         double q = clampd(atof(val), 0.0, 0.98);
         inst->left.ladder_resonance = q;
         inst->right.ladder_resonance = q;
-    } else if (strcmp(key, "ladder_enabled") == 0) {
-        int on = (strcmp(val, "On") == 0);
-        inst->left.ladder_enabled = on;
-        inst->right.ladder_enabled = on;
+    } else if (strcmp(key, "env_amount") == 0) {
+        inst->env_amount = clampd(atof(val), 0.0, 1.0);
     } else if (strcmp(key, "env_attack") == 0) {
         inst->attack_sec = time_norm_to_sec(atof(val));
     } else if (strcmp(key, "env_decay") == 0) {
@@ -358,8 +371,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     } else if (strcmp(key, "ladder_resonance") == 0) {
         int n = snprintf(buf, (size_t)buf_len, "%.3f", inst->left.ladder_resonance);
         return n;
-    } else if (strcmp(key, "ladder_enabled") == 0) {
-        int n = snprintf(buf, (size_t)buf_len, "%s", inst->left.ladder_enabled ? "On" : "Off");
+    } else if (strcmp(key, "env_amount") == 0) {
+        int n = snprintf(buf, (size_t)buf_len, "%.3f", inst->env_amount);
         return n;
     } else if (strcmp(key, "env_attack") == 0) {
         int n = snprintf(buf, (size_t)buf_len, "%.4f", time_sec_to_norm(inst->attack_sec));

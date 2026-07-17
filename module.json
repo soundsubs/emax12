@@ -1,7 +1,7 @@
 {
     "id": "Emax_FX",
     "name": "Emax FX",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "abbrev": "EmaxFX",
     "description": "E-mu Emax 12-bit sampling emulation: 7-pole AA filter, S/H decimation, 12-bit quantization, SSM2047-style ladder",
     "author": "soundsubs",
@@ -43,12 +43,13 @@
                 "default": 0.2
             },
             {
-                "key": "ladder_enabled",
-                "name": "Ladder Filter",
-                "type": "enum",
-                "options": ["Off", "On"],
-                "default": "On",
-                "options_as_string": true
+                "key": "env_amount",
+                "name": "Env Mod",
+                "type": "float",
+                "min": 0,
+                "max": 1,
+                "step": 0.01,
+                "default": 0.3
             },
             {
                 "key": "env_attack",
