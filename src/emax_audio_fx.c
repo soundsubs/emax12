@@ -473,5 +473,15 @@ static audio_fx_api_v2_t api = {
 audio_fx_api_v2_t* move_audio_fx_init_v2(const host_api_v1_t *host) {
     g_host = host;
     dbg_log("[Emax_FX] move_audio_fx_init_v2 called -- plugin loaded");
+    if (host) {
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+                 "[Emax_FX] host struct check: api_version=%u sample_rate=%d frames_per_block=%d mapped_memory=%p audio_out_offset=%d audio_in_offset=%d",
+                 host->api_version, host->sample_rate, host->frames_per_block,
+                 (void*)host->mapped_memory, host->audio_out_offset, host->audio_in_offset);
+        dbg_log(buf);
+    } else {
+        dbg_log("[Emax_FX] WARNING: host pointer is NULL");
+    }
     return &api;
 }

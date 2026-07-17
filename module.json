@@ -1,92 +1,110 @@
 {
     "id": "Emax_FX",
     "name": "Emax FX",
-    "version": "0.3.2",
+    "version": "0.4.1",
     "abbrev": "EmaxFX",
     "description": "E-mu Emax 12-bit sampling emulation: 7-pole AA filter, S/H decimation, 12-bit quantization, SSM2047-style ladder",
     "author": "soundsubs",
+    "license": "MIT",
     "dsp": "Emax_FX.so",
     "api_version": 2,
     "capabilities": {
-        "audio_in": true,
-        "audio_out": true,
         "chainable": true,
         "component_type": "audio_fx",
-        "capture": {
-            "groups": ["pads"]
-        },
-        "chain_params": [
-            {
-                "key": "rate",
-                "name": "Sample Rate",
-                "type": "enum",
-                "options": ["10kHz", "20kHz", "28kHz", "42kHz"],
-                "default": "10kHz",
-                "options_as_string": true
-            },
-            {
-                "key": "ladder_cutoff",
-                "name": "Ladder Cutoff",
-                "type": "float",
-                "min": 0,
-                "max": 1,
-                "step": 0.01,
-                "default": 0.901
-            },
-            {
-                "key": "ladder_resonance",
-                "name": "Ladder Resonance",
-                "type": "float",
-                "min": 0,
-                "max": 0.98,
-                "step": 0.01,
-                "default": 0.2
-            },
-            {
-                "key": "env_amount",
-                "name": "Env Mod",
-                "type": "float",
-                "min": 0,
-                "max": 1,
-                "step": 0.01,
-                "default": 0.3
-            },
-            {
-                "key": "env_attack",
-                "name": "Filter Attack",
-                "type": "float",
-                "min": 0,
-                "max": 1,
-                "step": 0.01,
-                "default": 0.2703
-            },
-            {
-                "key": "env_decay",
-                "name": "Filter Decay",
-                "type": "float",
-                "min": 0,
-                "max": 1,
-                "step": 0.01,
-                "default": 0.6221
-            },
-            {
-                "key": "env_sustain",
-                "name": "Filter Sustain",
-                "type": "float",
-                "min": 0,
-                "max": 1,
-                "step": 0.01,
-                "default": 0.7
-            },
-            {
-                "key": "env_release",
-                "name": "Filter Release",
-                "type": "float",
-                "min": 0,
-                "max": 1,
-                "step": 0.01,
-                "default": 0.6697
+        "ui_hierarchy": {
+            "levels": {
+                "root": {
+                    "name": "Emax FX",
+                    "params": [
+                        {
+                            "key": "rate",
+                            "label": "Rate",
+                            "type": "enum",
+                            "options": ["10kHz", "20kHz", "28kHz", "42kHz"],
+                            "default": "10kHz"
+                        },
+                        {
+                            "key": "ladder_cutoff",
+                            "label": "Cutoff",
+                            "type": "float",
+                            "min": 0.0,
+                            "max": 1.0,
+                            "default": 0.901,
+                            "step": 0.01,
+                            "unit": "%"
+                        },
+                        {
+                            "key": "ladder_resonance",
+                            "label": "Resonance",
+                            "type": "float",
+                            "min": 0.0,
+                            "max": 0.98,
+                            "default": 0.2,
+                            "step": 0.01
+                        },
+                        {
+                            "key": "env_amount",
+                            "label": "Env Mod",
+                            "type": "float",
+                            "min": 0.0,
+                            "max": 1.0,
+                            "default": 0.3,
+                            "step": 0.01,
+                            "unit": "%"
+                        },
+                        {
+                            "key": "env_attack",
+                            "label": "Attack",
+                            "type": "float",
+                            "min": 0.0,
+                            "max": 1.0,
+                            "default": 0.2703,
+                            "step": 0.01,
+                            "unit": "%"
+                        },
+                        {
+                            "key": "env_decay",
+                            "label": "Decay",
+                            "type": "float",
+                            "min": 0.0,
+                            "max": 1.0,
+                            "default": 0.6221,
+                            "step": 0.01,
+                            "unit": "%"
+                        },
+                        {
+                            "key": "env_sustain",
+                            "label": "Sustain",
+                            "type": "float",
+                            "min": 0.0,
+                            "max": 1.0,
+                            "default": 0.7,
+                            "step": 0.01,
+                            "unit": "%"
+                        },
+                        {
+                            "key": "env_release",
+                            "label": "Release",
+                            "type": "float",
+                            "min": 0.0,
+                            "max": 1.0,
+                            "default": 0.6697,
+                            "step": 0.01,
+                            "unit": "%"
+                        }
+                    ],
+                    "knobs": [
+                        "rate",
+                        "ladder_cutoff",
+                        "ladder_resonance",
+                        "env_amount",
+                        "env_attack",
+                        "env_decay",
+                        "env_sustain",
+                        "env_release"
+                    ]
+                }
             }
-        ]
+        }
     }
 }
