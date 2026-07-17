@@ -19,7 +19,7 @@
  *   ladder_cutoff    float, 0.0-1.0 normalized, log-mapped to 200-12000 Hz
  *                    internally (see cutoff_norm_to_hz/hz_to_norm below)
  *   ladder_resonance float, 0-0.98
- *   ladder_bypass    enum: "Off" | "On"
+ *   ladder_enabled   enum: "Off" | "On" (On = filter engaged)
  *
  * LADDER_CUTOFF IS NORMALIZED, NOT RAW HZ: on-device testing showed the
  * Shadow UI applies a fixed absolute float step (0.01) to knob turns
@@ -72,6 +72,22 @@
  * Also a real simplification: this tracks a single global "current
  * note" (last note-on wins), not per-voice/polyphonic pitch. Chords
  * will all alias at the last-played note's rate, not each note's own.
+ *
+ * FILTER ENVELOPE (knobs 5-8, also depends on on_midi/capture):
+ * env_attack/env_decay/env_sustain/env_release drive a standard ADSR
+ * that modulates the ladder filter cutoff over time, sweeping between
+ * the floor (200 Hz) and the manually-set ladder_cutoff knob (which now
+ * acts as the envelope's peak/target rather than a static cutoff).
+ * A/D/R are normalized 0-1, log-mapped to 1ms-5000ms (same reasoning as
+ * ladder_cutoff's normalization -- see above). Sustain is a plain 0-1
+ * level, no mapping needed.
+ *
+ * SAFE-FALLBACK DESIGN: env_level starts at 1.0 (fully open) and only
+ * moves once on_midi actually receives a note-on. If module-level
+ * capture never fires (the same unverified risk noted above), the
+ * envelope simply never engages and the filter behaves exactly as
+ * before -- manual cutoff only, no regression. Once a note does arrive,
+ * standard ADSR behavior kicks in from then on.
  */
 
 #include <stdint.h>
@@ -83,18 +99,51 @@
 #include "audio_fx_api_v2.h"
 #include "emax_dsp.h"
 
+typedef enum {
+    ENV_IDLE,
+    ENV_ATTACK,
+    ENV_DECAY,
+    ENV_SUSTAIN,
+    ENV_RELEASE
+} EnvStage;
+
 typedef struct {
     EmaxVoice left;
     EmaxVoice right;
     double sample_rate;
     double base_rate_hz;   /* the user-selected preset, applies at C4 (note 60) */
     int current_note;      /* last note-on received via on_midi; -1 = none yet */
+
+    double base_cutoff_norm; /* manual ladder_cutoff knob position; envelope peak target */
+
+    EnvStage env_stage;
+    double env_level;          /* current 0.0-1.0 envelope output */
+    double attack_sec;
+    double decay_sec;
+    double sustain_level;      /* 0.0-1.0, plain linear */
+    double release_sec;
+    double release_start_level;
 } Emax12Instance;
 
 static double clampd(double x, double lo, double hi) {
     if (x < lo) return lo;
     if (x > hi) return hi;
     return x;
+}
+
+/* env_attack/env_decay/env_release wire values are normalized 0.0-1.0;
+ * log-mapped to 1ms-5000ms. */
+#define ENV_TIME_MIN 0.001
+#define ENV_TIME_MAX 5.0
+
+static double time_norm_to_sec(double norm) {
+    norm = clampd(norm, 0.0, 1.0);
+    return ENV_TIME_MIN * pow(ENV_TIME_MAX / ENV_TIME_MIN, norm);
+}
+
+static double time_sec_to_norm(double sec) {
+    sec = clampd(sec, ENV_TIME_MIN, ENV_TIME_MAX);
+    return log(sec / ENV_TIME_MIN) / log(ENV_TIME_MAX / ENV_TIME_MIN);
 }
 
 /* ladder_cutoff wire value is normalized 0.0-1.0; log-mapped to the
@@ -136,6 +185,71 @@ static void apply_rate_string(Emax12Instance *inst, const char *val) {
     update_effective_rate(inst);
 }
 
+/* Advance the ADSR by one audio frame's worth of time (dt seconds). */
+static void env_process(Emax12Instance *inst, double dt) {
+    switch (inst->env_stage) {
+    case ENV_ATTACK:
+        if (inst->attack_sec <= 0.0001) {
+            inst->env_level = 1.0;
+            inst->env_stage = ENV_DECAY;
+        } else {
+            inst->env_level += dt / inst->attack_sec;
+            if (inst->env_level >= 1.0) {
+                inst->env_level = 1.0;
+                inst->env_stage = ENV_DECAY;
+            }
+        }
+        break;
+    case ENV_DECAY: {
+        double target = inst->sustain_level;
+        if (inst->decay_sec <= 0.0001) {
+            inst->env_level = target;
+            inst->env_stage = ENV_SUSTAIN;
+        } else {
+            /* Decay always ramps from 1.0 (attack's completion point)
+             * down to sustain_level, over decay_sec. */
+            double total_delta = 1.0 - target;
+            inst->env_level -= (total_delta * dt / inst->decay_sec);
+            if (inst->env_level <= target) {
+                inst->env_level = target;
+                inst->env_stage = ENV_SUSTAIN;
+            }
+        }
+        break;
+    }
+    case ENV_SUSTAIN:
+        inst->env_level = inst->sustain_level;
+        break;
+    case ENV_RELEASE:
+        if (inst->release_sec <= 0.0001) {
+            inst->env_level = 0.0;
+            inst->env_stage = ENV_IDLE;
+        } else {
+            inst->env_level -= (inst->release_start_level * dt / inst->release_sec);
+            if (inst->env_level <= 0.0) {
+                inst->env_level = 0.0;
+                inst->env_stage = ENV_IDLE;
+            }
+        }
+        break;
+    case ENV_IDLE:
+    default:
+        /* Hold current level -- see SAFE-FALLBACK DESIGN in header
+         * comment: starts at 1.0 and only moves once a note-on ever
+         * arrives via on_midi. */
+        break;
+    }
+}
+
+static void env_note_on(Emax12Instance *inst) {
+    inst->env_stage = ENV_ATTACK; /* ramps from wherever env_level currently is */
+}
+
+static void env_note_off(Emax12Instance *inst) {
+    inst->release_start_level = inst->env_level;
+    inst->env_stage = ENV_RELEASE;
+}
+
 static void* create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
     (void)config_json; /* see KNOWN SIMPLIFICATION above */
@@ -150,12 +264,20 @@ static void* create_instance(const char *module_dir, const char *config_json) {
     apply_rate_string(inst, "10kHz");
     inst->left.ladder_enabled = 1;
     inst->right.ladder_enabled = 1;
+    inst->base_cutoff_norm = cutoff_hz_to_norm(8000.0);
     inst->left.ladder_cutoff_hz = 8000.0;
     inst->right.ladder_cutoff_hz = 8000.0;
     inst->left.ladder_resonance = 0.2;
     inst->right.ladder_resonance = 0.2;
     emax_ladder_set(&inst->left.ladder, 8000.0, 0.2);
     emax_ladder_set(&inst->right.ladder, 8000.0, 0.2);
+
+    inst->env_stage = ENV_IDLE;
+    inst->env_level = 1.0; /* fully open until/unless a note-on ever arrives */
+    inst->attack_sec = 0.01;   /* 10ms */
+    inst->decay_sec = 0.2;     /* 200ms */
+    inst->sustain_level = 0.7;
+    inst->release_sec = 0.3;   /* 300ms */
 
     return inst;
 }
@@ -168,7 +290,15 @@ static void process_block(void *instance, int16_t *audio_inout, int frames) {
     Emax12Instance *inst = (Emax12Instance*)instance;
     if (!inst) return;
 
+    double dt = 1.0 / inst->sample_rate;
+
     for (int i = 0; i < frames; i++) {
+        env_process(inst, dt);
+        double eff_norm = clampd(inst->env_level * inst->base_cutoff_norm, 0.0, 1.0);
+        double eff_hz = cutoff_norm_to_hz(eff_norm);
+        emax_ladder_set(&inst->left.ladder, eff_hz, inst->left.ladder_resonance);
+        emax_ladder_set(&inst->right.ladder, eff_hz, inst->right.ladder_resonance);
+
         double l = audio_inout[2 * i]     / 32768.0;
         double r = audio_inout[2 * i + 1] / 32768.0;
 
@@ -190,21 +320,23 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "rate") == 0) {
         apply_rate_string(inst, val);
     } else if (strcmp(key, "ladder_cutoff") == 0) {
-        double hz = cutoff_norm_to_hz(atof(val));
-        inst->left.ladder_cutoff_hz = hz;
-        inst->right.ladder_cutoff_hz = hz;
-        emax_ladder_set(&inst->left.ladder, hz, inst->left.ladder_resonance);
-        emax_ladder_set(&inst->right.ladder, hz, inst->right.ladder_resonance);
+        inst->base_cutoff_norm = clampd(atof(val), 0.0, 1.0);
     } else if (strcmp(key, "ladder_resonance") == 0) {
         double q = clampd(atof(val), 0.0, 0.98);
         inst->left.ladder_resonance = q;
         inst->right.ladder_resonance = q;
-        emax_ladder_set(&inst->left.ladder, inst->left.ladder_cutoff_hz, q);
-        emax_ladder_set(&inst->right.ladder, inst->right.ladder_cutoff_hz, q);
-    } else if (strcmp(key, "ladder_bypass") == 0) {
+    } else if (strcmp(key, "ladder_enabled") == 0) {
         int on = (strcmp(val, "On") == 0);
-        inst->left.ladder_enabled = !on;
-        inst->right.ladder_enabled = !on;
+        inst->left.ladder_enabled = on;
+        inst->right.ladder_enabled = on;
+    } else if (strcmp(key, "env_attack") == 0) {
+        inst->attack_sec = time_norm_to_sec(atof(val));
+    } else if (strcmp(key, "env_decay") == 0) {
+        inst->decay_sec = time_norm_to_sec(atof(val));
+    } else if (strcmp(key, "env_sustain") == 0) {
+        inst->sustain_level = clampd(atof(val), 0.0, 1.0);
+    } else if (strcmp(key, "env_release") == 0) {
+        inst->release_sec = time_norm_to_sec(atof(val));
     }
 }
 
@@ -221,13 +353,25 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         int n = snprintf(buf, (size_t)buf_len, "%s", s);
         return n;
     } else if (strcmp(key, "ladder_cutoff") == 0) {
-        int n = snprintf(buf, (size_t)buf_len, "%.4f", cutoff_hz_to_norm(inst->left.ladder_cutoff_hz));
+        int n = snprintf(buf, (size_t)buf_len, "%.4f", inst->base_cutoff_norm);
         return n;
     } else if (strcmp(key, "ladder_resonance") == 0) {
         int n = snprintf(buf, (size_t)buf_len, "%.3f", inst->left.ladder_resonance);
         return n;
-    } else if (strcmp(key, "ladder_bypass") == 0) {
-        int n = snprintf(buf, (size_t)buf_len, "%s", inst->left.ladder_enabled ? "Off" : "On");
+    } else if (strcmp(key, "ladder_enabled") == 0) {
+        int n = snprintf(buf, (size_t)buf_len, "%s", inst->left.ladder_enabled ? "On" : "Off");
+        return n;
+    } else if (strcmp(key, "env_attack") == 0) {
+        int n = snprintf(buf, (size_t)buf_len, "%.4f", time_sec_to_norm(inst->attack_sec));
+        return n;
+    } else if (strcmp(key, "env_decay") == 0) {
+        int n = snprintf(buf, (size_t)buf_len, "%.4f", time_sec_to_norm(inst->decay_sec));
+        return n;
+    } else if (strcmp(key, "env_sustain") == 0) {
+        int n = snprintf(buf, (size_t)buf_len, "%.3f", inst->sustain_level);
+        return n;
+    } else if (strcmp(key, "env_release") == 0) {
+        int n = snprintf(buf, (size_t)buf_len, "%.4f", time_sec_to_norm(inst->release_sec));
         return n;
     }
     return -1;
@@ -246,14 +390,17 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
         /* Note On */
         inst->current_note = note;
         update_effective_rate(inst);
+        env_note_on(inst);
     } else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
-        /* Note Off -- monophonic simplification: only clear tracking if
-         * this was the note we're currently tracking, so a released
-         * lower/higher note in a chord doesn't yank the rate back. */
+        /* Note Off -- monophonic simplification: only react if this was
+         * the note we're currently tracking, so a released lower/higher
+         * note in a chord doesn't yank the pitch or envelope back. */
         if (inst->current_note == note) {
-            /* Leave the last rate in place rather than snapping back to
-             * base -- avoids an audible jump at release. Real polyphonic
-             * tracking would need a per-voice note stack, out of scope. */
+            env_note_off(inst);
+            /* Pitch tracking: leave the last rate in place rather than
+             * snapping back to base -- avoids an audible jump at
+             * release. Real polyphonic tracking would need a per-voice
+             * note stack, out of scope. */
         }
     }
 }

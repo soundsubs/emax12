@@ -111,15 +111,47 @@ make test          # native sanity check of the DSP core only
 
 ## Controls (Shadow UI chain_params, see `module.json`)
 
-| Key | Function | Range |
-|---|---|---|
-| `rate` | Sample rate | enum: `10kHz`, `20kHz`, `28kHz`, `42kHz` |
-| `ladder_cutoff` | Ladder filter cutoff | 200–12000 Hz |
-| `ladder_resonance` | Ladder filter resonance | 0–0.98 |
-| `ladder_bypass` | Ladder filter bypass | enum: `Off`, `On` |
+| Knob | Key | Function | Range |
+|---|---|---|---|
+| 1 | `rate` | Sample rate | enum: `10kHz`, `20kHz`, `28kHz`, `42kHz` |
+| 2 | `ladder_cutoff` | Ladder filter cutoff (envelope peak) | 0.0–1.0 normalized, log-mapped to 200–12000 Hz |
+| 3 | `ladder_resonance` | Ladder filter resonance | 0–0.98 |
+| 4 | `ladder_enabled` | Ladder filter on/off | enum: `Off`, `On` |
+| 5 | `env_attack` | Filter envelope attack | 0.0–1.0 normalized, log-mapped to 1ms–5000ms |
+| 6 | `env_decay` | Filter envelope decay | 0.0–1.0 normalized, log-mapped to 1ms–5000ms |
+| 7 | `env_sustain` | Filter envelope sustain | 0.0–1.0, plain linear level |
+| 8 | `env_release` | Filter envelope release | 0.0–1.0 normalized, log-mapped to 1ms–5000ms |
 
 Default on startup: 10 kHz / 12-bit (the "Emaxed" lo-fi reference point),
-ladder at 8000 Hz / 0.2 resonance, enabled.
+ladder cutoff peak ~8000 Hz / 0.2 resonance, enabled, envelope
+attack 10ms / decay 200ms / sustain 0.7 / release 300ms.
+
+## Filter envelope (experimental — depends on on_midi/capture)
+
+Knobs 5–8 drive a standard ADSR that modulates the ladder filter cutoff
+over time. The `ladder_cutoff` knob (knob 2) now acts as the envelope's
+**peak target** rather than a static cutoff: the envelope sweeps the
+cutoff between the floor (200 Hz) and whatever `ladder_cutoff` is set to,
+shaped by attack/decay/sustain/release. This mirrors classic subtractive
+synth architecture (filter cutoff knob = envelope amount/peak, ADSR
+shapes the sweep over time) rather than adding a 9th "envelope amount"
+knob, since all 8 physical knobs were already spoken for.
+
+This depends on the same `on_midi`/module-level `capture` mechanism as
+pitch-tracked aliasing (see below), with the same unverified risk: I
+can't confirm from available docs whether capturing the pad/note group
+mirrors notes to the module or steals them from the sound generator in
+the same chain slot.
+
+**Safe-fallback design**: the envelope starts "fully open" (`env_level =
+1.0`) and only begins moving once `on_midi` actually receives a real
+note-on. If capture never fires at all, the envelope simply never
+engages and the filter behaves exactly as before your update — manual
+cutoff only, **zero regression** even if this feature doesn't work.
+Once a note does arrive, standard ADSR behavior takes over from then on.
+
+Known simplification: like the pitch-tracking, this tracks one global
+envelope (monophonic) — chords don't get per-note envelopes.
 
 ## Known simplification
 
@@ -132,7 +164,7 @@ hasn't been verified against real on-device Shadow UI behavior yet.
 ## Knob control fix
 
 The 8 physical knobs map to `chain_params` automatically per Schwung's
-docs, but `rate` and `ladder_bypass` are `enum` type params, and by
+docs, but `rate` and `ladder_enabled` are `enum` type params, and by
 default Schwung's Shadow UI sends the enum option's numeric **index**
 over the wire, not its string label — while this plugin's `set_param()`
 compares against the literal label strings. Both entries now declare
