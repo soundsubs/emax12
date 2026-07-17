@@ -112,7 +112,26 @@
  * continuing to guess blind about the "pads" capture group. */
 static const host_api_v1_t *g_host = NULL;
 
+/* Diagnostic logging: host->log() produced ZERO output in Schwung
+ * Manager's System > Load Logs viewer across multiple test rounds, even
+ * though the plugin is definitely loading and processing audio (cutoff/
+ * resonance/rate controls work). That strongly suggests that log viewer
+ * only shows the top-level "shim" supervisor's own log, not per-module
+ * output -- so this writes directly to a file in the module's own
+ * (writable) install directory instead, bypassing host->log() and that
+ * viewer entirely. Retrieve via SSH:
+ *   ssh ableton@move.local cat /data/UserData/schwung/modules/audio_fx/Emax_FX/debug.log
+ * or via SFTP (Cyberduck) per the Schwung manual. */
+#define DEBUG_LOG_PATH "/data/UserData/schwung/modules/audio_fx/Emax_FX/debug.log"
+
 static void dbg_log(const char *msg) {
+    FILE *f = fopen(DEBUG_LOG_PATH, "a");
+    if (f) {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
+    /* Also still try host->log(), in case it does go somewhere useful
+     * we just haven't found yet -- costs nothing to keep both. */
     if (g_host && g_host->log) {
         g_host->log(msg);
     }
