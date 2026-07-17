@@ -106,6 +106,18 @@
 #include "audio_fx_api_v2.h"
 #include "emax_dsp.h"
 
+/* Stored so on_midi/create_instance can emit diagnostic host->log() calls
+ * (see /system/logs in Schwung Manager) -- added to definitively answer
+ * whether on_midi/capture ever actually fires at all, rather than
+ * continuing to guess blind about the "pads" capture group. */
+static const host_api_v1_t *g_host = NULL;
+
+static void dbg_log(const char *msg) {
+    if (g_host && g_host->log) {
+        g_host->log(msg);
+    }
+}
+
 typedef enum {
     ENV_IDLE,
     ENV_ATTACK,
@@ -260,6 +272,7 @@ static void env_note_off(Emax12Instance *inst) {
 static void* create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
     (void)config_json; /* see KNOWN SIMPLIFICATION above */
+    dbg_log("[Emax_FX] create_instance called");
 
     Emax12Instance *inst = (Emax12Instance*)calloc(1, sizeof(Emax12Instance));
     if (!inst) return NULL;
@@ -391,10 +404,20 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
 }
 
 static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
-    (void)source;
     Emax12Instance *inst = (Emax12Instance*)instance;
-    if (!inst || !msg || len < 3) return;
+    if (!inst || !msg || len < 1) return;
 
+    char dbgbuf[96];
+    if (len >= 3) {
+        snprintf(dbgbuf, sizeof(dbgbuf), "[Emax_FX] on_midi: status=0x%02x note=%d vel=%d src=%d len=%d",
+                 msg[0], msg[1], msg[2], source, len);
+    } else {
+        snprintf(dbgbuf, sizeof(dbgbuf), "[Emax_FX] on_midi: status=0x%02x src=%d len=%d",
+                 msg[0], source, len);
+    }
+    dbg_log(dbgbuf);
+
+    if (len < 3) return;
     uint8_t status = msg[0] & 0xF0;
     uint8_t note = msg[1];
     uint8_t velocity = msg[2];
@@ -429,6 +452,7 @@ static audio_fx_api_v2_t api = {
 };
 
 audio_fx_api_v2_t* move_audio_fx_init_v2(const host_api_v1_t *host) {
-    (void)host;
+    g_host = host;
+    dbg_log("[Emax_FX] move_audio_fx_init_v2 called -- plugin loaded");
     return &api;
 }
